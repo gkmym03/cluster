@@ -10,6 +10,7 @@ from tkinter import filedialog, messagebox, ttk
 from kmeans_core import (
     SUPPORTED_INPUT_EXTENSIONS,
     format_summary,
+    parse_cluster_range,
     run_kmeans,
     setup_logger,
 )
@@ -75,7 +76,7 @@ class KMeansApp:
         output_dir = Path(output_folder)
         return str(output_dir / f"{input_path.stem}_result{input_path.suffix.lower()}")
 
-    def validate_inputs(self) -> tuple[str, int, str]:
+    def validate_inputs(self) -> tuple[str, str, str]:
         input_file = self.input_path.get().strip()
         output_folder = self.output_path.get().strip()
         cluster_text = self.cluster_count.get().strip()
@@ -90,9 +91,9 @@ class KMeansApp:
         if not cluster_text:
             raise ValueError("クラスタ数を入力してください。")
         try:
-            n_clusters = int(cluster_text)
+            parse_cluster_range(cluster_text)
         except ValueError as error:
-            raise ValueError("クラスタ数は整数で入力してください。") from error
+            raise ValueError(str(error)) from error
 
         if not output_folder:
             raise ValueError("出力先フォルダを指定してください。")
@@ -101,7 +102,7 @@ class KMeansApp:
         if not Path(output_folder).is_dir():
             raise ValueError("出力先にはフォルダを指定してください。")
 
-        return input_file, n_clusters, output_folder
+        return input_file, cluster_text, output_folder
 
     def execute(self) -> None:
         try:

@@ -1,5 +1,7 @@
 import csv
 import logging
+import math
+import re
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -72,12 +74,15 @@ def read_table(path: str) -> tuple[list[str], list[list[object]]]:
     raise ValueError("対応している入力形式は .csv / .xlsx のみです。")
 
 
-def write_result(result_rows: list[tuple[object, int]], output_file: str) -> None:
+def write_result(result_rows: list[tuple], output_file: str, headers: list[str] | None = None) -> None:
+    if headers is None:
+        headers = ["sample_id", "cluster"]
+
     out_ext = Path(output_file).suffix.lower()
     if out_ext == ".csv":
         with open(output_file, "w", encoding="utf-8-sig", newline="") as file:
             writer = csv.writer(file)
-            writer.writerow(["sample_id", "cluster"])
+            writer.writerow(headers)
             writer.writerows(result_rows)
         return
 
@@ -85,7 +90,7 @@ def write_result(result_rows: list[tuple[object, int]], output_file: str) -> Non
         workbook = Workbook()
         worksheet = workbook.active
         worksheet.title = "result"
-        worksheet.append(["sample_id", "cluster"])
+        worksheet.append(headers)
         for row in result_rows:
             worksheet.append(list(row))
         workbook.save(output_file)
@@ -111,6 +116,36 @@ def build_timestamped_output_path(output_file: str) -> str:
         counter += 1
 
 
+def parse_cluster_range(cluster_spec: int | str) -> list[int]:
+    if isinstance(cluster_spec, int):
+        cluster_values = [cluster_spec]
+    else:
+        text = str(cluster_spec).strip()
+        single_match = re.fullmatch(r"\d+", text)
+        range_match = re.fullmatch(r"(\d+)\s*(?:-|~|～|〜|－|―|to)\s*(\d+)", text, flags=re.IGNORECASE)
+
+        if single_match:
+            cluster_values = [int(text)]
+        elif range_match:
+            start = int(range_match.group(1))
+            end = int(range_match.group(2))
+            if start > end:
+                raise ValueError("クラスタ数の範囲は開始値が終了値以下になるように指定してください。")
+            cluster_values = list(range(start, end + 1))
+        else:
+            raise ValueError("クラスタ数は整数、または 5-8 / 5～8 のような範囲で指定してください。")
+
+    if any(value < 1 for value in cluster_values):
+        raise ValueError("クラスタ数は 1 以上を指定してください。")
+    return cluster_values
+
+
+def format_cluster_spec(cluster_values: list[int]) -> str:
+    if len(cluster_values) == 1:
+        return str(cluster_values[0])
+    return f"{cluster_values[0]}-{cluster_values[-1]}"
+
+
 def summarize_result(
     input_file: str,
     output_file: str,
@@ -119,7 +154,8 @@ def summarize_result(
     processed_rows: int,
     missing_rows: int,
     non_numeric_rows: int,
-    n_clusters: int,
+    cluster_values: list[int],
+    cluster_metrics: list[dict],
 ) -> dict:
     return {
         "input_file": input_file,
@@ -129,11 +165,31 @@ def summarize_result(
         "processed_rows": processed_rows,
         "missing_rows_removed": int(missing_rows),
         "non_numeric_rows_removed": int(non_numeric_rows),
-        "cluster_count": n_clusters,
+        "cluster_count": format_cluster_spec(cluster_values),
+        "cluster_metrics": cluster_metrics,
     }
 
 
+def format_metric(value: float) -> str:
+    if value is None or not math.isfinite(value):
+        return "NA"
+    return f"{value:.6g}"
+
+
 def format_summary(summary: dict) -> str:
+    metric_lines = [
+        "クラスタ数\tWSS\tCH\tDB",
+        *[
+            (
+                f"{metric['clusters']}\t"
+                f"{format_metric(metric['wss'])}\t"
+                f"{format_metric(metric['calinski_harabasz'])}\t"
+                f"{format_metric(metric['davies_bouldin'])}"
+            )
+            for metric in summary.get("cluster_metrics", [])
+        ],
+    ]
+
     return "\n".join(
         [
             "クラスタリングが完了しました。",
@@ -145,6 +201,9 @@ def format_summary(summary: dict) -> str:
             f"欠損で除外した件数: {summary['missing_rows_removed']}",
             f"非数値で除外した件数: {summary['non_numeric_rows_removed']}",
             f"クラスタ数: {summary['cluster_count']}",
+            "",
+            "クラスタ数の判断指標:",
+            *metric_lines,
         ]
     )
 
@@ -297,23 +356,75 @@ def is_same_clustering(labels_a: np.ndarray | None, labels_b: np.ndarray | None,
     return True
 
 
-def run_numpy_kmeans(data: np.ndarray, n_clusters: int) -> np.ndarray:
+def run_numpy_kmeans_result(data: np.ndarray, n_clusters: int) -> tuple[np.ndarray, np.ndarray, float]:
     rng = np.random.RandomState(KMEANS_RANDOM_STATE)
     best_labels = None
+    best_centers = None
     best_inertia = None
 
     for _ in range(KMEANS_N_INIT):
-        labels, _, inertia = run_single_kmeans(data, n_clusters, rng)
+        labels, centers, inertia = run_single_kmeans(data, n_clusters, rng)
         if best_inertia is None or (
             inertia < best_inertia and not is_same_clustering(labels, best_labels, n_clusters)
         ):
             best_labels = labels.copy()
+            best_centers = centers.copy()
             best_inertia = inertia
 
+    return best_labels, best_centers, float(best_inertia)
+
+
+def run_numpy_kmeans(data: np.ndarray, n_clusters: int) -> np.ndarray:
+    best_labels, _, _ = run_numpy_kmeans_result(data, n_clusters)
     return best_labels + 1
 
 
-def run_kmeans(input_file: str, n_clusters: int, output_file: str) -> tuple[list[tuple[object, int]], dict]:
+def compute_cluster_metrics(
+    data: np.ndarray,
+    labels: np.ndarray,
+    centers: np.ndarray,
+    inertia: float,
+) -> dict:
+    n_samples = data.shape[0]
+    n_clusters = centers.shape[0]
+    counts = np.bincount(labels, minlength=n_clusters)
+    total_ss = float(np.sum((data - data.mean(axis=0)) ** 2))
+    between_ss = max(total_ss - inertia, 0.0)
+
+    if n_clusters > 1 and n_samples > n_clusters and inertia > 0.0:
+        calinski_harabasz = (between_ss / (n_clusters - 1)) / (inertia / (n_samples - n_clusters))
+    else:
+        calinski_harabasz = math.nan
+
+    cluster_spreads = np.zeros(n_clusters, dtype=np.float64)
+    for cluster_index in range(n_clusters):
+        members = data[labels == cluster_index]
+        if len(members) > 0:
+            cluster_spreads[cluster_index] = np.mean(np.sqrt(row_norms_squared(members - centers[cluster_index])))
+
+    center_distances = np.sqrt(compute_squared_distances(centers, centers))
+    ratios = np.full((n_clusters, n_clusters), -np.inf, dtype=np.float64)
+    for i in range(n_clusters):
+        for j in range(n_clusters):
+            if i == j:
+                continue
+            if center_distances[i, j] == 0.0:
+                ratios[i, j] = math.inf
+            else:
+                ratios[i, j] = (cluster_spreads[i] + cluster_spreads[j]) / center_distances[i, j]
+    davies_bouldin = float(np.mean(np.max(ratios, axis=1))) if n_clusters > 1 else math.nan
+
+    return {
+        "clusters": n_clusters,
+        "wss": float(inertia),
+        "calinski_harabasz": float(calinski_harabasz),
+        "davies_bouldin": davies_bouldin,
+        "min_cluster_n": int(counts.min()),
+        "max_cluster_n": int(counts.max()),
+    }
+
+
+def run_kmeans(input_file: str, n_clusters: int | str, output_file: str) -> tuple[list[tuple], dict]:
     headers, rows = read_table(input_file)
     if len(headers) < 2:
         raise ValueError("データは 2 列以上必要です。先頭列を ID、2 列目以降を特徴量にしてください。")
@@ -352,19 +463,37 @@ def run_kmeans(input_file: str, n_clusters: int, output_file: str) -> tuple[list
     if non_numeric_rows:
         logging.warning("非数値データにより除外した行数: %s", non_numeric_rows)
 
+    cluster_values = parse_cluster_range(n_clusters)
+
     if not valid_features:
         raise ValueError("分析可能なデータがありません。欠損値や非数値データを確認してください。")
-    if n_clusters < 1:
-        raise ValueError("クラスタ数は 1 以上を指定してください。")
-    if n_clusters > len(valid_features):
+    if max(cluster_values) > len(valid_features):
         raise ValueError("クラスタ数は分析対象件数以下にしてください。")
 
     scaled_features = standardize_features(np.asarray(valid_features, dtype=np.float64))
-    labels = run_numpy_kmeans(scaled_features, n_clusters)
+    labels_by_cluster_count: dict[int, np.ndarray] = {}
+    cluster_metrics: list[dict] = []
+
+    for cluster_count in cluster_values:
+        labels_zero_based, centers, inertia = run_numpy_kmeans_result(scaled_features, cluster_count)
+        labels_by_cluster_count[cluster_count] = labels_zero_based + 1
+        cluster_metrics.append(compute_cluster_metrics(scaled_features, labels_zero_based, centers, inertia))
 
     actual_output_file = build_timestamped_output_path(output_file)
-    result_rows = list(zip(valid_ids, labels.tolist()))
-    write_result(result_rows, actual_output_file)
+    if len(cluster_values) == 1:
+        cluster_count = cluster_values[0]
+        result_headers = ["sample_id", "cluster"]
+        result_rows = list(zip(valid_ids, labels_by_cluster_count[cluster_count].tolist()))
+    else:
+        result_headers = ["sample_id", *[f"cluster_{cluster_count}" for cluster_count in cluster_values]]
+        result_rows = [
+            tuple(
+                [sample_id]
+                + [int(labels_by_cluster_count[cluster_count][row_index]) for cluster_count in cluster_values]
+            )
+            for row_index, sample_id in enumerate(valid_ids)
+        ]
+    write_result(result_rows, actual_output_file, result_headers)
 
     summary = summarize_result(
         input_file=input_file,
@@ -374,7 +503,8 @@ def run_kmeans(input_file: str, n_clusters: int, output_file: str) -> tuple[list
         processed_rows=len(valid_features),
         missing_rows=missing_rows,
         non_numeric_rows=non_numeric_rows,
-        n_clusters=n_clusters,
+        cluster_values=cluster_values,
+        cluster_metrics=cluster_metrics,
     )
 
     logging.info("元データ件数: %s", original_rows)
