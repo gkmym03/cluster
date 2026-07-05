@@ -1,8 +1,29 @@
-.vs/
+# Runtime and generated data
+*.csv
+*.xlsx
+*.xls
+*.log
+*.txt
+*.zip
+
+# Python runtime artifacts
 __pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Build and packaged output
 build/
 build_small/
 dist/
 dist_small/
-*.egg-info/
-*.csv
+.pyinstaller/
+release/
+KMeans_Clustering_GUI.egg-info/
+
+# Generated image output
+*.png
+*.jpg
+*.jpeg

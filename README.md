@@ -1,37 +1,65 @@
-# K-means Clustering Script
+# K-Means Cluster Tool
 
-このスクリプトは、外部CSVファイルからデータを読み込み、指定したクラスター数でk-meansクラスタリングを実行します。
+先頭列を ID、2 列目以降を特徴量として KMeans クラスタリングを実行する Windows 向けツールです。CLI と GUI の両方に対応しています。
 
-## 必要条件
+## 必要な依存関係
 
-- Python 3.x
-- 必要なライブラリ: pandas, scikit-learn, matplotlib
+- numpy
+- openpyxl
+- pyinstaller
 
-## インストール
+インストール例:
 
-1. 依存関係をインストールします：
-   ```
-   pip install -r requirements.txt
-   ```
+```powershell
+python -m pip install numpy openpyxl pyinstaller
+```
 
-## 使用方法
+## 使い方
 
-1. `data.csv` ファイルを同じディレクトリに配置します。CSVファイルは数値データを含むものとします。
-2. スクリプトを実行します：
-   ```
-   python kmeans_clustering.py
-   ```
-3. クラスター数を入力します。
-4. 結果がコンソールに表示され、`clustered_data.csv` に保存されます。
-5. 2次元データの場合、クラスタリングのプロットが表示されます。
+### CLI
 
-## 注意事項
+```powershell
+python k-means_cluster.py input.xlsx 3 --output result.xlsx
+```
 
-- データは数値のみを扱います。カテゴリカルデータがある場合は前処理が必要です。
-- 可視化は2次元データでのみサポートされています。多次元データの場合はPCAなどの次元削減を追加してください。
-- エラーが発生した場合、ファイルパスやデータ形式を確認してください。
+### GUI
 
-## トラブルシューティング
+```powershell
+python kmeans_gui.py
+```
 
-- `FileNotFoundError`: `data.csv` が存在するか確認してください。
-- インポートエラー: ライブラリがインストールされているか確認してください。
+または `run_gui.bat` をダブルクリックしてください。
+
+GUI では出力ファイルではなく出力先フォルダを指定します。保存されるファイル名は `（入力ファイル名）_result` がベースになり、末尾に `月日時分` が自動付与されます。
+
+## exe の作成
+
+`build_exe.bat` を実行すると、`PyInstaller --onefile --windowed` で GUI アプリをビルドします。
+
+生成物:
+
+- `dist\KMeansClusterGUI.exe`
+
+ビルド前に `build`、`dist`、`.pyinstaller` は自動で削除されます。
+
+## 配布時の注意
+
+- 対象 OS は Windows を前提にしています。
+- 初回起動時は `--onefile` の展開で少し時間がかかることがあります。
+- Windows Defender などのセキュリティソフトが exe を確認する場合があります。
+- アイコン差し替え、インストーラー化、コード署名は未対応です。
+
+## 配布用ファイル
+
+- `dist\KMeansClusterGUI.exe`
+- `DISTRIBUTION_MESSAGE.md`
+- `USER_MANUAL.md`
+
+配布時は上記 3 点を一緒に渡すと案内しやすくなります。
+
+## 現在の仕様
+
+- 入力対応形式は `.csv` / `.xlsx` のみです。
+- 出力対応形式は `.csv` / `.xlsx` のみです。
+- GUI では出力ファイル名を直接指定せず、出力先フォルダを指定します。
+- 保存名は `（入力ファイル名）_result_月日時分` 形式で自動生成されます。
