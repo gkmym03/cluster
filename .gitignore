@@ -23,6 +23,7 @@ dist_small/
 .pyinstaller/
 release/
 KMeans_Clustering_GUI.egg-info/
+xxx/
 
 # Generated image output
 *.png
