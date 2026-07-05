@@ -100,6 +100,51 @@ def write_result(result_rows: list[tuple], output_file: str, headers: list[str] 
     raise ValueError("対応している出力形式は .csv / .xlsx のみです。")
 
 
+def write_summary_csv(summary: dict, summary_file: str) -> None:
+    profile_headers = summary["cluster_profile_headers"]
+    metric_headers = [
+        "clusters",
+        "total_n",
+        "min_cluster_n",
+        "max_cluster_n",
+        "min_cluster_percent",
+        "max_cluster_percent",
+        "wss",
+        "CH",
+        "DB",
+    ]
+    metric_descriptions = [
+        ("wss", "クラスター内平方和。小さいほど各クラスター内のまとまりが良い。"),
+        ("CH", "Calinski-Harabasz 指数。大きいほどクラスター間分離とクラスター内凝集のバランスが良い。"),
+        ("DB", "Davies-Bouldin 指数。小さいほど良い。"),
+    ]
+
+    with open(summary_file, "w", encoding="utf-8-sig", newline="") as file:
+        writer = csv.writer(file)
+        writer.writerow(profile_headers)
+        writer.writerows(summary["cluster_profiles"])
+        writer.writerow([])
+        writer.writerow(["判断指標"])
+        writer.writerow(metric_headers)
+        for metric in summary["cluster_metrics"]:
+            writer.writerow(
+                [
+                    metric["clusters"],
+                    metric["total_n"],
+                    metric["min_cluster_n"],
+                    metric["max_cluster_n"],
+                    metric["min_cluster_percent"],
+                    metric["max_cluster_percent"],
+                    metric["wss"],
+                    metric["calinski_harabasz"],
+                    metric["davies_bouldin"],
+                ]
+            )
+        writer.writerow([])
+        writer.writerow(["指標", "説明"])
+        writer.writerows(metric_descriptions)
+
+
 def build_timestamped_output_path(output_file: str) -> str:
     path = Path(output_file)
     timestamp = datetime.now().strftime("%m%d%H%M")
@@ -114,6 +159,11 @@ def build_timestamped_output_path(output_file: str) -> str:
         if not candidate.exists():
             return str(candidate)
         counter += 1
+
+
+def build_summary_output_path(actual_output_file: str) -> str:
+    path = Path(actual_output_file)
+    return str(path.with_name(f"{path.stem}_summary.csv"))
 
 
 def parse_cluster_range(cluster_spec: int | str) -> list[int]:
@@ -149,23 +199,29 @@ def format_cluster_spec(cluster_values: list[int]) -> str:
 def summarize_result(
     input_file: str,
     output_file: str,
+    summary_output_file: str,
     id_col: str,
     original_rows: int,
     processed_rows: int,
     missing_rows: int,
     non_numeric_rows: int,
     cluster_values: list[int],
+    cluster_profile_headers: list[str],
+    cluster_profiles: list[list[object]],
     cluster_metrics: list[dict],
 ) -> dict:
     return {
         "input_file": input_file,
         "output_file": output_file,
+        "summary_output_file": summary_output_file,
         "id_column": id_col,
         "original_rows": original_rows,
         "processed_rows": processed_rows,
         "missing_rows_removed": int(missing_rows),
         "non_numeric_rows_removed": int(non_numeric_rows),
         "cluster_count": format_cluster_spec(cluster_values),
+        "cluster_profile_headers": cluster_profile_headers,
+        "cluster_profiles": cluster_profiles,
         "cluster_metrics": cluster_metrics,
     }
 
@@ -195,6 +251,7 @@ def format_summary(summary: dict) -> str:
             "クラスタリングが完了しました。",
             f"入力ファイル: {summary['input_file']}",
             f"出力ファイル: {summary['output_file']}",
+            f"summaryファイル: {summary['summary_output_file']}",
             f"ID 列: {summary['id_column']}",
             f"元データ件数: {summary['original_rows']}",
             f"分析対象件数: {summary['processed_rows']}",
@@ -379,6 +436,30 @@ def run_numpy_kmeans(data: np.ndarray, n_clusters: int) -> np.ndarray:
     return best_labels + 1
 
 
+def format_profile_feature_name(feature_col: str) -> str:
+    if feature_col.endswith("_z"):
+        return feature_col
+    return f"{feature_col}_z"
+
+
+def build_cluster_profile_rows(
+    data: np.ndarray,
+    labels: np.ndarray,
+    n_clusters: int,
+) -> list[list[object]]:
+    n_samples = data.shape[0]
+    rows: list[list[object]] = []
+
+    for cluster_index in range(n_clusters):
+        members = data[labels == cluster_index]
+        count = int(len(members))
+        percent = count / n_samples if n_samples else math.nan
+        means = members.mean(axis=0).tolist() if count else [math.nan] * data.shape[1]
+        rows.append([n_clusters, cluster_index + 1, count, percent, *means])
+
+    return rows
+
+
 def compute_cluster_metrics(
     data: np.ndarray,
     labels: np.ndarray,
@@ -416,11 +497,14 @@ def compute_cluster_metrics(
 
     return {
         "clusters": n_clusters,
+        "total_n": int(n_samples),
         "wss": float(inertia),
         "calinski_harabasz": float(calinski_harabasz),
         "davies_bouldin": davies_bouldin,
         "min_cluster_n": int(counts.min()),
         "max_cluster_n": int(counts.max()),
+        "min_cluster_percent": float(counts.min() / n_samples) if n_samples else math.nan,
+        "max_cluster_percent": float(counts.max() / n_samples) if n_samples else math.nan,
     }
 
 
@@ -472,14 +556,24 @@ def run_kmeans(input_file: str, n_clusters: int | str, output_file: str) -> tupl
 
     scaled_features = standardize_features(np.asarray(valid_features, dtype=np.float64))
     labels_by_cluster_count: dict[int, np.ndarray] = {}
+    cluster_profile_headers = [
+        "clusters",
+        "cluster",
+        "n",
+        "percent",
+        *[format_profile_feature_name(str(feature_col)) for feature_col in feature_cols],
+    ]
+    cluster_profiles: list[list[object]] = []
     cluster_metrics: list[dict] = []
 
     for cluster_count in cluster_values:
         labels_zero_based, centers, inertia = run_numpy_kmeans_result(scaled_features, cluster_count)
         labels_by_cluster_count[cluster_count] = labels_zero_based + 1
+        cluster_profiles.extend(build_cluster_profile_rows(scaled_features, labels_zero_based, cluster_count))
         cluster_metrics.append(compute_cluster_metrics(scaled_features, labels_zero_based, centers, inertia))
 
     actual_output_file = build_timestamped_output_path(output_file)
+    summary_output_file = build_summary_output_path(actual_output_file)
     if len(cluster_values) == 1:
         cluster_count = cluster_values[0]
         result_headers = ["sample_id", "cluster"]
@@ -498,17 +592,22 @@ def run_kmeans(input_file: str, n_clusters: int | str, output_file: str) -> tupl
     summary = summarize_result(
         input_file=input_file,
         output_file=actual_output_file,
+        summary_output_file=summary_output_file,
         id_col=str(id_col),
         original_rows=original_rows,
         processed_rows=len(valid_features),
         missing_rows=missing_rows,
         non_numeric_rows=non_numeric_rows,
         cluster_values=cluster_values,
+        cluster_profile_headers=cluster_profile_headers,
+        cluster_profiles=cluster_profiles,
         cluster_metrics=cluster_metrics,
     )
+    write_summary_csv(summary, summary_output_file)
 
     logging.info("元データ件数: %s", original_rows)
     logging.info("分析対象件数: %s", len(valid_features))
     logging.info("出力ファイル: %s", actual_output_file)
+    logging.info("summaryファイル: %s", summary_output_file)
     logging.info("処理完了")
     return result_rows, summary
